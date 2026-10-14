@@ -1,10 +1,12 @@
 // ==WindhawkMod==
 // @id              chinese-holiday-calendar
-// @name            Chinese Holiday Calendar
-// @name:zh-CN      中国节假日日历
-// @description     Show Chinese statutory holidays and adjusted workdays, from an ICS feed you supply, in the Windows 11 calendar flyout
-// @description:zh-CN 在 Windows 11 日历中显示你自己填的 ICS 订阅源里的中国法定节假日与调休安排
-// @version         0.21
+// @name            Chinese & Vietnamese Holiday Calendar
+// @name:zh-CN      中国与越南节假日日历
+// @name:vi-VN      Lịch Âm & Lễ Tết (Việt - Trung)
+// @description     Show statutory holidays, adjusted workdays, and Vietnamese lunar calendar in the Windows 11 calendar flyout
+// @description:zh-CN 在 Windows 11 日历中显示中国节假日/调休及越南农历
+// @description:vi-VN Hiển thị ngày âm lịch, Mùng 1, Rằm và Lễ Tết trên bảng lịch Windows 11
+// @version         0.22
 // @author          dcsmf
 // @github          https://github.com/dcsmf
 // @include         ShellExperienceHost.exe
@@ -235,6 +237,16 @@ calendar names `LunarTextBlock`, falls back to the smallest text that has conten
 remembers the element it wrote to by interface pointer so that a block the shell has
 already replaced is not written to any more.
 
+## Vietnamese Lunar Calendar / Lịch Âm Việt Nam
+
+This mod includes an optional offline Vietnamese lunar calendar calculation (Hồ Ngọc Đức astronomical algorithm) contributed by @phatMT97 and @vantruong-dev.
+
+- **Offline calculation**: Calculates Vietnamese lunar dates (`d/m`, `d/mN` for leap months) completely offline without requiring any network requests.
+- **Special day highlighting**: Highlights Full Moon (*Rằm* - day 15), New Moon (*Mùng 1* - day 1), and traditional holidays in red (`#FF5A5A` by default).
+- **Sexagenary Cycle Header**: Displays the full Vietnamese lunar year name (*Năm Can Chi*, e.g. `Tháng 9 Năm Bính Ngọ`) in the calendar header.
+
+> **Disclaimer:** The mod author (@dcsmf) does not use or validate the Vietnamese lunar calendar. All Vietnamese lunar date calculations, leap-month handling, and maintenance are handled by @phatMT97 and @vantruong-dev. Please report any Vietnamese lunar date issues directly to their repositories.
+
 ## Credits
 
 The way the calendar window is found follows lonfro's
@@ -250,6 +262,33 @@ use it themselves.
 
 // ==WindhawkModSettings==
 /*
+- calendarMode: chinese
+  $name: Calendar mode
+  $name:zh-CN: 日历模式
+  $name:vi-VN: Chế độ lịch
+  $description: >-
+    Select the calendar mode:
+    "chinese" (default): Chinese statutory holidays & workdays from an ICS feed.
+    "vietnamese": Vietnamese lunar calendar (offline calculation with Mùng 1 & Rằm highlights and Can Chi header).
+  $description:zh-CN: >-
+    选择日历模式：
+    "chinese"（默认）：使用 ICS 订阅源显示中国法定节假日与调休。
+    "vietnamese"：离线计算越南农历，显示初一/十五高亮及天干地支年号。
+  $description:vi-VN: >-
+    Chọn chế độ lịch:
+    "chinese" (mặc định): Lễ Tết và bù làm việc Trung Quốc qua link ICS.
+    "vietnamese": Lịch Âm Việt Nam (tính toán offline, tô màu Mùng 1 & Rằm, tiêu đề Can Chi).
+  $options:
+    - chinese: Chinese statutory holidays (ICS)
+    - vietnamese: Vietnamese lunar calendar (offline)
+- vietnameseSpecialColor: "FF5A5A"
+  $name: Vietnamese special day colour (Mùng 1, Rằm, Holidays)
+  $name:zh-CN: 越南农历特殊日期颜色（初一、十五、传统节日）
+  $name:vi-VN: Màu ngày đặc biệt (Mùng 1, Rằm, Lễ Tết)
+  $description: Hex color code (RRGGBB) for special lunar days in Vietnamese mode (default red FF5A5A).
+  $description:zh-CN: 越南农历模式下特殊日期的颜色（默认红色 FF5A5A）。
+  $description:vi-VN: Mã màu Hex (RRGGBB) cho ngày Mùng 1, Rằm và Lễ Tết (mặc định đỏ FF5A5A).
+  #! $format: colorRgb
 - dataSourceUrl: ""
   $name: Data source (ICS, empty = no data)
   $name:zh-CN: 数据来源（ICS 地址，留空则不显示节假日）
@@ -396,6 +435,7 @@ namespace wux = winrt::Windows::UI::Xaml;
 ////////////////////////////////////////////////////////////////////////////////
 
 #include <chrono>
+#include <cmath>
 #include <cstdlib>
 #include <cwctype>
 #include <memory>
@@ -436,6 +476,8 @@ struct Settings {
     std::wstring workdayText = L"补班";
     winrt::Windows::UI::Color offDayColor{255, 78, 161, 255};
     winrt::Windows::UI::Color workdayColor{255, 255, 90, 90};
+    std::wstring calendarMode = L"chinese";
+    winrt::Windows::UI::Color vietnameseSpecialColor{255, 255, 90, 90};
 };
 
 std::mutex g_settingsMutex;
@@ -515,6 +557,12 @@ winrt::Windows::UI::Color ReadColorSetting(PCWSTR name,
 void LoadSettings() {
     auto settings = std::make_shared<Settings>();
 
+    settings->calendarMode = ReadStringSetting(L"calendarMode");
+    if (settings->calendarMode.empty()) {
+        settings->calendarMode = L"chinese";
+    }
+    settings->vietnameseSpecialColor =
+        ReadColorSetting(L"vietnameseSpecialColor", Settings{}.vietnameseSpecialColor);
     settings->dataSourceUrl = ReadStringSetting(L"dataSourceUrl");
     settings->refreshIntervalHours = Wh_GetIntSetting(L"refreshIntervalHours");
     settings->replaceText = Wh_GetIntSetting(L"replaceText") != 0;
@@ -700,6 +748,235 @@ bool LookupHoliday(int32_t key, HolidayInfo& out) {
 void StoreHolidays(HolidayMap parsed) {
     std::lock_guard<std::mutex> lock(g_holidaysMutex);
     g_holidays = std::move(parsed);
+}
+
+////////////////////////////////////////////////////////////////////////////////
+// Vietnamese Lunar Calendar Calculation (Ho Ngoc Duc Algorithm)
+//
+// Standalone offline astronomical calculation for the Vietnamese lunar calendar.
+// Contributed by @phatMT97 and @vantruong-dev.
+
+namespace VietnameseLunar {
+
+constexpr double kPI = 3.14159265358979323846;
+
+inline int INT(double d) {
+    return static_cast<int>(std::floor(d));
+}
+
+inline int jdFromDate(int dd, int mm, int yy) {
+    int a = (14 - mm) / 12;
+    int y = yy + 4800 - a;
+    int m = mm + 12 * a - 3;
+    int jd = dd + (153 * m + 2) / 5 + 365 * y + y / 4 - y / 100 + y / 400 - 32045;
+    if (jd < 2299161) {
+        jd = dd + (153 * m + 2) / 5 + 365 * y + y / 4 - 32083;
+    }
+    return jd;
+}
+
+inline double NewMoon(int k) {
+    double T = k / 1236.85;
+    double T2 = T * T;
+    double T3 = T2 * T;
+    double dr = kPI / 180.0;
+    double Jd1 = 2415020.75933 + 29.53058868 * k + 0.0001178 * T2 - 0.000000155 * T3;
+    Jd1 += 0.00033 * std::sin((166.56 + 132.87 * T - 0.009173 * T2) * dr);
+    double M = 359.2242 + 29.10535608 * k - 0.0000333 * T2 - 0.00000347 * T3;
+    double Mpr = 306.0253 + 385.81691806 * k + 0.0107306 * T2 + 0.00001236 * T3;
+    double F = 21.2964 + 390.67050646 * k - 0.0016528 * T2 - 0.00000239 * T3;
+    double C1 = (0.1734 - 0.000393 * T) * std::sin(M * dr) + 0.0021 * std::sin(2.0 * dr * M);
+    C1 -= 0.4068 * std::sin(Mpr * dr) + 0.0161 * std::sin(2.0 * dr * Mpr);
+    C1 -= 0.0004 * std::sin(3.0 * dr * Mpr);
+    C1 += 0.0104 * std::sin(2.0 * dr * F) - 0.0051 * std::sin(dr * (M + Mpr));
+    C1 -= 0.0074 * std::sin(dr * (M - Mpr)) + 0.0004 * std::sin(dr * (2.0 * F + M));
+    C1 -= 0.0004 * std::sin(dr * (2.0 * F - M)) - 0.0006 * std::sin(dr * (2.0 * F + Mpr));
+    C1 += 0.0010 * std::sin(dr * (2.0 * F - Mpr)) + 0.0005 * std::sin(dr * (2.0 * Mpr + M));
+    double deltat = (T < -11.0)
+        ? (0.001 + 0.000839 * T + 0.0002261 * T2 - 0.00000845 * T3 - 0.000000081 * T * T3)
+        : (-0.000278 + 0.000265 * T + 0.000262 * T2);
+    return Jd1 + C1 - deltat;
+}
+
+inline double SunLongitude(double jdn) {
+    double T = (jdn - 2451545.0) / 36525.0;
+    double T2 = T * T;
+    double dr = kPI / 180.0;
+    double M = 357.52910 + 35999.05030 * T - 0.0001559 * T2 - 0.00000048 * T * T2;
+    double L0 = 280.46645 + 36000.76983 * T + 0.0003032 * T2;
+    double DL = (1.914600 - 0.004817 * T - 0.000014 * T2) * std::sin(dr * M);
+    DL += (0.019993 - 0.000101 * T) * std::sin(dr * 2.0 * M) + 0.000290 * std::sin(dr * 3.0 * M);
+    double L = (L0 + DL) * dr;
+    L -= kPI * 2.0 * INT(L / (kPI * 2.0));
+    return L;
+}
+
+inline int getSunLongitude(int dayNumber, double timeZone = 7.0) {
+    return INT(SunLongitude(dayNumber - 0.5 - timeZone / 24.0) / kPI * 6.0);
+}
+
+inline int getNewMoonDay(int k, double timeZone = 7.0) {
+    return INT(NewMoon(k) + 0.5 + timeZone / 24.0);
+}
+
+inline int getLunarMonth11(int yy, double timeZone = 7.0) {
+    int off = jdFromDate(31, 12, yy) - 2415021;
+    int k = INT(off / 29.530588853);
+    int nm = getNewMoonDay(k, timeZone);
+    int sunLong = getSunLongitude(nm, timeZone);
+    if (sunLong >= 9) {
+        nm = getNewMoonDay(k - 1, timeZone);
+    }
+    return nm;
+}
+
+inline int getLeapMonthOffset(int a11, double timeZone = 7.0) {
+    int k = INT((a11 - 2415021.076998695) / 29.530588853 + 0.5);
+    int last = 0;
+    int i = 1;
+    int arc = getSunLongitude(getNewMoonDay(k + i, timeZone), timeZone);
+    do {
+        last = arc;
+        i++;
+        arc = getSunLongitude(getNewMoonDay(k + i, timeZone), timeZone);
+    } while (arc != last && i < 14);
+    return i - 1;
+}
+
+inline void convertSolar2Lunar(int dd, int mm, int yy, int& lunarDay, int& lunarMonth, int& lunarYear, int& lunarLeap, double timeZone = 7.0) {
+    int dayNumber = jdFromDate(dd, mm, yy);
+    int k = INT((dayNumber - 2415021.076998695) / 29.530588853);
+    int monthStart = getNewMoonDay(k + 1, timeZone);
+    if (monthStart > dayNumber) {
+        monthStart = getNewMoonDay(k, timeZone);
+    }
+    int a11 = getLunarMonth11(yy, timeZone);
+    int b11 = a11;
+    if (a11 >= monthStart) {
+        lunarYear = yy;
+        a11 = getLunarMonth11(yy - 1, timeZone);
+    } else {
+        lunarYear = yy + 1;
+        b11 = getLunarMonth11(yy + 1, timeZone);
+    }
+    lunarDay = dayNumber - monthStart + 1;
+    int diff = INT((monthStart - a11) / 29.0);
+    lunarLeap = 0;
+    lunarMonth = diff + 11;
+    if (b11 - a11 > 365) {
+        int leapMonthDiff = getLeapMonthOffset(a11, timeZone);
+        if (diff >= leapMonthDiff) {
+            lunarMonth = diff + 10;
+            if (diff == leapMonthDiff) {
+                lunarLeap = 1;
+            }
+        }
+    }
+    if (lunarMonth > 12) {
+        lunarMonth -= 12;
+    }
+    if (lunarMonth >= 11 && diff < 4) {
+        lunarYear -= 1;
+    }
+}
+
+inline std::wstring getCanChiYear(int lunarYear) {
+    static const wchar_t* const CAN[] = {
+        L"Giáp", L"Ất", L"Bính", L"Đinh", L"Mậu", L"Kỷ", L"Canh", L"Tân", L"Nhâm", L"Quý"
+    };
+    static const wchar_t* const CHI[] = {
+        L"Tý", L"Sửu", L"Dần", L"Mão", L"Thìn", L"Tỵ", L"Ngọ", L"Mùi", L"Thân", L"Dậu", L"Tuất", L"Hợi"
+    };
+    int canIdx = (lunarYear + 6) % 10;
+    if (canIdx < 0) canIdx += 10;
+    int chiIdx = (lunarYear + 8) % 12;
+    if (chiIdx < 0) chiIdx += 12;
+    return std::wstring(CAN[canIdx]) + L" " + CHI[chiIdx];
+}
+
+} // namespace VietnameseLunar
+
+struct VietnameseHolidayInfo {
+    std::wstring name;
+    bool isSpecial = false;
+    std::wstring headerText;
+};
+
+VietnameseHolidayInfo CalculateVietnameseLunar(int32_t key) {
+    int y = key / 10000;
+    int m = (key / 100) % 100;
+    int d = key % 100;
+
+    int lDay = 0, lMonth = 0, lYear = 0, lLeap = 0;
+    VietnameseLunar::convertSolar2Lunar(d, m, y, lDay, lMonth, lYear, lLeap);
+
+    VietnameseHolidayInfo info;
+    if (lLeap) {
+        info.name = std::to_wstring(lDay) + L"/" + std::to_wstring(lMonth) + L"N";
+    } else {
+        info.name = std::to_wstring(lDay) + L"/" + std::to_wstring(lMonth);
+    }
+
+    if (lDay == 1 || lDay == 15) {
+        info.isSpecial = true;
+    }
+
+    if (!lLeap) {
+        if (lMonth == 1 && (lDay >= 1 && lDay <= 3)) info.isSpecial = true; // Tết Nguyên Đán
+        if (lMonth == 1 && lDay == 15) info.isSpecial = true;               // Tết Nguyên Tiêu
+        if (lMonth == 3 && lDay == 10) info.isSpecial = true;               // Giỗ Tổ Hùng Vương
+        if (lMonth == 4 && lDay == 15) info.isSpecial = true;               // Phật Đản
+        if (lMonth == 5 && lDay == 5) info.isSpecial = true;                // Đoan Ngọ
+        if (lMonth == 7 && lDay == 15) info.isSpecial = true;               // Vu Lan
+        if (lMonth == 8 && lDay == 15) info.isSpecial = true;               // Trung Thu
+        if (lMonth == 12 && lDay == 23) info.isSpecial = true;              // Ông Táo
+    }
+
+    // Solar holidays
+    if (m == 1 && d == 1) info.isSpecial = true;
+    if (m == 4 && d == 30) info.isSpecial = true;
+    if (m == 5 && d == 1) info.isSpecial = true;
+    if (m == 9 && d == 2) info.isSpecial = true;
+
+    std::wstring canChi = VietnameseLunar::getCanChiYear(lYear);
+    std::wstring leapSuffix = lLeap ? L" (Nhuận)" : L"";
+    info.headerText = std::to_wstring(lDay) + L" Tháng " + std::to_wstring(lMonth) + leapSuffix + L" Năm " + canChi;
+
+    return info;
+}
+
+std::mutex g_vietnameseLunarMutex;
+std::unordered_map<int32_t, VietnameseHolidayInfo> g_vietnameseLunarCache;
+
+bool LookupVietnameseLunar(int32_t key, VietnameseHolidayInfo& out) {
+    std::lock_guard<std::mutex> lock(g_vietnameseLunarMutex);
+    auto it = g_vietnameseLunarCache.find(key);
+    if (it != g_vietnameseLunarCache.end()) {
+        out = it->second;
+        return true;
+    }
+    out = CalculateVietnameseLunar(key);
+    g_vietnameseLunarCache[key] = out;
+    return true;
+}
+
+bool IsVietnameseLunarText(std::wstring const& text) {
+    if (text.empty() || text.size() > 7) {
+        return false;
+    }
+    size_t slash = text.find(L'/');
+    if (slash == std::wstring::npos || slash == 0 || slash + 1 >= text.size()) {
+        return false;
+    }
+    for (size_t i = 0; i < slash; i++) {
+        if (!iswdigit(text[i])) return false;
+    }
+    size_t end = text.size();
+    if (text.back() == L'N') end--;
+    for (size_t i = slash + 1; i < end; i++) {
+        if (!iswdigit(text[i])) return false;
+    }
+    return true;
 }
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -1830,6 +2107,9 @@ bool IsOwnText(std::wstring const& text, Settings const& settings) {
     if (text.empty()) {
         return false;
     }
+    if (settings.calendarMode == L"vietnamese" && IsVietnameseLunarText(text)) {
+        return true;
+    }
     if (text == settings.workdayText || text == settings.offDayText) {
         return true;
     }
@@ -2012,7 +2292,13 @@ void ApplyToDayItem(wuxc::CalendarViewDayItem const& item) {
     std::wstring desired;
     // With "replace the lunar text" switched off, the cell keeps the text of the
     // shell and only the colour is written.
-    if (hasInfo && settings->replaceText) {
+    if (settings->calendarMode == L"vietnamese") {
+        VietnameseHolidayInfo vinfo;
+        LookupVietnameseLunar(key, vinfo);
+        if (settings->replaceText) {
+            desired = vinfo.name;
+        }
+    } else if (hasInfo && settings->replaceText) {
         if (info.isOffDay) {
             desired = settings->offDayText.empty()
                           ? info.name
@@ -2058,7 +2344,19 @@ void ApplyToDayItem(wuxc::CalendarViewDayItem const& item) {
     // with "replace the lunar text" switched off as well, and reading it back
     // later would save the mod's own brush as the original one once the shell has
     // rewritten the text of a cell the mod has already coloured.
-    if (hasInfo) {
+    if (settings->calendarMode == L"vietnamese") {
+        VietnameseHolidayInfo vinfo;
+        LookupVietnameseLunar(key, vinfo);
+        if (vinfo.isSpecial) {
+            SaveForeground(cell, label);
+            cell.ownBrush = SetForegroundIfDifferent(
+                label, settings->vietnameseSpecialColor, cell.ownBrush);
+            cell.hadColor = true;
+        } else if (cell.hadColor) {
+            RestoreForeground(label, cell);
+            cell.hadColor = false;
+        }
+    } else if (hasInfo) {
         SaveForeground(cell, label);
         cell.ownBrush = SetForegroundIfDifferent(
             label,
@@ -2325,6 +2623,162 @@ void WatchCalendarLayoutOnCurrentThread() {
 constexpr size_t kMaxScannedElements = 16384;
 constexpr int kMaxScanDepth = 96;
 
+////////////////////////////////////////////////////////////////////////////////
+// Lunar Header replacement (Vietnamese Mode)
+
+bool IsChineseLunarHeaderText(std::wstring const& text) {
+    std::wstring value = text;
+    if (value.rfind(L"农历", 0) == 0 || value.rfind(L"農曆", 0) == 0) {
+        value.erase(0, 2);
+    }
+
+    const size_t monthEnd = value.find(L'月');
+    if (monthEnd == std::wstring::npos || monthEnd == 0 || monthEnd > 2 ||
+        monthEnd + 1 >= value.size()) {
+        return false;
+    }
+
+    const std::wstring month = value.substr(0, monthEnd);
+    const std::wstring monthChars = L"正一二三四五六七八九十冬腊臘";
+    size_t monthStart = 0;
+    if (month.size() == 2 && (month[0] == L'闰' || month[0] == L'閏')) {
+        monthStart = 1;
+    } else if (month.size() != 1) {
+        return false;
+    }
+    if (monthChars.find(month[monthStart]) == std::wstring::npos) {
+        return false;
+    }
+
+    const std::wstring day = value.substr(monthEnd + 1);
+    if (day.size() == 2 && day[0] == L'初') {
+        return std::wstring(L"一二三四五六七八九十").find(day[1]) != std::wstring::npos;
+    }
+    if (day == L"十" || day == L"二十" || day == L"三十") {
+        return true;
+    }
+    if (day.size() == 2 && (day[0] == L'十' || day[0] == L'廿')) {
+        return std::wstring(L"一二三四五六七八九").find(day[1]) != std::wstring::npos;
+    }
+    return false;
+}
+
+struct LunarHeaderState {
+    winrt::weak_ref<wuxc::TextBlock> label;
+    std::wstring savedText;
+    std::wstring appliedText;
+};
+
+thread_local std::unordered_map<void*, LunarHeaderState> t_lunarHeaders;
+
+void ApplyLunarHeaderTextInTree(wux::DependencyObject const& root,
+                                int32_t lunarDateKey,
+                                size_t& budget,
+                                int depth) {
+    if (!root || budget == 0 || depth > kMaxScanDepth) return;
+    --budget;
+
+    if (root.try_as<wuxc::CalendarViewDayItem>()) return;
+
+    if (auto textBlock = root.try_as<wuxc::TextBlock>()) {
+        const std::wstring current = ElementText(textBlock);
+        void* id = winrt::get_abi(textBlock);
+        auto it = t_lunarHeaders.find(id);
+        const bool tracked = it != t_lunarHeaders.end() && it->second.label.get() == textBlock;
+
+        if (tracked && current == it->second.appliedText) {
+            VietnameseHolidayInfo hinfo;
+            LookupVietnameseLunar(lunarDateKey, hinfo);
+            const std::wstring desired = hinfo.headerText;
+            if (current != desired) {
+                try {
+                    textBlock.Text(desired);
+                    it->second.appliedText = desired;
+                    t_applyWrote = true;
+                } catch (...) {}
+            }
+        } else if (IsChineseLunarHeaderText(current)) {
+            LunarHeaderState& state = t_lunarHeaders[id];
+            if (!tracked) {
+                state = {};
+                state.label = winrt::make_weak(textBlock);
+            }
+            state.savedText = current;
+            VietnameseHolidayInfo hinfo;
+            LookupVietnameseLunar(lunarDateKey, hinfo);
+            const std::wstring desired = hinfo.headerText;
+            try {
+                textBlock.Text(desired);
+                state.appliedText = desired;
+                t_applyWrote = true;
+            } catch (...) {}
+        } else if (tracked) {
+            t_lunarHeaders.erase(it);
+        }
+    }
+
+    int count = 0;
+    try {
+        count = wuxm::VisualTreeHelper::GetChildrenCount(root);
+    } catch (...) {
+        return;
+    }
+    for (int childIndex = 0; childIndex < count && budget > 0; childIndex++) {
+        wux::DependencyObject child = nullptr;
+        try {
+            child = wuxm::VisualTreeHelper::GetChild(root, childIndex);
+        } catch (...) {
+            continue;
+        }
+        ApplyLunarHeaderTextInTree(child, lunarDateKey, budget, depth + 1);
+    }
+}
+
+void UninitializeLunarHeaderTextOnCurrentThread() {
+    for (auto& entry : t_lunarHeaders) {
+        auto label = entry.second.label.get();
+        if (!label) continue;
+        try {
+            if (!entry.second.appliedText.empty() && ElementText(label) == entry.second.appliedText) {
+                label.Text(entry.second.savedText);
+            }
+        } catch (...) {}
+    }
+    t_lunarHeaders.clear();
+}
+
+void ApplyLunarHeaderTextOnCurrentThread() {
+    const std::shared_ptr<const Settings> settings = GetSettings();
+    if (settings->calendarMode != L"vietnamese" || !settings->replaceText) {
+        UninitializeLunarHeaderTextOnCurrentThread();
+        return;
+    }
+    wux::Window window = nullptr;
+    try {
+        window = wux::Window::Current();
+    } catch (...) {
+        return;
+    }
+    if (!window) return;
+
+    SYSTEMTIME today{};
+    GetLocalTime(&today);
+    const int32_t todayDate = MakeDateKey(today.wYear, today.wMonth, today.wDay);
+
+    size_t budget = kMaxScannedElements;
+    if (auto content = window.Content()) {
+        ApplyLunarHeaderTextInTree(content, todayDate, budget, 0);
+    }
+    try {
+        for (auto popup : wuxm::VisualTreeHelper::GetOpenPopups(window)) {
+            if (budget == 0) break;
+            if (auto child = popup.Child()) {
+                ApplyLunarHeaderTextInTree(child, todayDate, budget, 0);
+            }
+        }
+    } catch (...) {}
+}
+
 // A thread without a XAML window is worth reporting once: "the mod does nothing" is
 // otherwise hard to tell from "this month has no holidays".
 thread_local bool t_loggedNoWindow = false;
@@ -2483,6 +2937,13 @@ void SweepDayItems() {
         }
     }
 
+    const std::shared_ptr<const Settings> settings = GetSettings();
+    if (settings->calendarMode == L"vietnamese") {
+        ApplyLunarHeaderTextOnCurrentThread();
+    } else {
+        UninitializeLunarHeaderTextOnCurrentThread();
+    }
+
     // A pass which wrote nothing is one more reason to believe the shell is done with
     // rewriting the cells, and the timer stops once enough of them follow each other.
     // Without that the timer would run for the rest of the session, because the shell
@@ -2544,6 +3005,8 @@ void UninitializeDayItemsForCurrentThread() {
             }
         }
     }
+
+    UninitializeLunarHeaderTextOnCurrentThread();
 
     // Swapped with an empty container instead of cleared: clear() keeps the buckets and
     // the capacity on a UI thread of the shell, which outlives the mod, so the memory of
