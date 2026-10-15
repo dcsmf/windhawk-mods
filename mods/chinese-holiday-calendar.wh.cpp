@@ -242,8 +242,9 @@ already replaced is not written to any more.
 This mod includes an optional offline Vietnamese lunar calendar calculation (Hồ Ngọc Đức astronomical algorithm) contributed by @phatMT97 and @vantruong-dev.
 
 - **Offline calculation**: Calculates Vietnamese lunar dates (`d/m`, `d/mN` for leap months) completely offline without requiring any network requests.
-- **Special day highlighting**: Highlights Full Moon (*Rằm* - day 15), New Moon (*Mùng 1* - day 1), and traditional holidays in red (`#FF5A5A` by default).
+- **Special day highlighting**: Highlights Full Moon (*Rằm* - day 15) and New Moon (*Mùng 1* - day 1) in red (`#FF5A5A` by default, configurable).
 - **Sexagenary Cycle Header**: Displays the full Vietnamese lunar date and year name (*Năm Can Chi*, e.g. `14 Tháng 9 Năm Bính Ngọ`) in the calendar header.
+- **Independent ICS Holiday Subscriptions**: You can independently subscribe to an iCalendar (.ics) feed to overlay statutory holidays and adjusted workdays onto either the Chinese or Vietnamese calendar.
 
 > **Disclaimer:** The mod author (@dcsmf) does not use or validate the Vietnamese lunar calendar. All Vietnamese lunar date calculations, leap-month handling, and maintenance are handled by @phatMT97 and @vantruong-dev. Please report any Vietnamese lunar date issues directly to their repositories.
 
@@ -268,26 +269,33 @@ use it themselves.
   $name:vi-VN: Chế độ lịch
   $description: >-
     Select the calendar mode:
-    "chinese" (default): Chinese statutory holidays & workdays from an ICS feed.
-    "vietnamese": Vietnamese lunar calendar (offline calculation with Mùng 1 & Rằm highlights and Can Chi header).
+    "chinese" (default): Chinese lunar calendar and statutory holidays.
+    "vietnamese": Vietnamese lunar calendar (offline calculation with Can Chi header).
   $description:zh-CN: >-
     选择日历模式：
-    "chinese"（默认）：使用 ICS 订阅源显示中国法定节假日与调休。
-    "vietnamese"：离线计算越南农历，显示初一/十五高亮及天干地支年号。
+    "chinese"（默认）：中国农历与法定节假日。
+    "vietnamese"：越南农历（离线计算，显示天干地支年号）。
   $description:vi-VN: >-
     Chọn chế độ lịch:
-    "chinese" (mặc định): Lễ Tết và bù làm việc Trung Quốc qua link ICS.
-    "vietnamese": Lịch Âm Việt Nam (tính toán offline, tô màu Mùng 1 & Rằm, tiêu đề Can Chi).
+    "chinese" (mặc định): Lịch âm và Lễ Tết Trung Quốc.
+    "vietnamese": Lịch Âm Việt Nam (tính toán offline, tiêu đề Can Chi).
   $options:
-    - chinese: Chinese statutory holidays (ICS)
-    - vietnamese: Vietnamese lunar calendar (offline)
+    - chinese: Chinese calendar
+    - vietnamese: Vietnamese lunar calendar
+- highlightSpecialLunarDays: true
+  $name: Highlight Mùng 1 and Rằm
+  $name:zh-CN: 高亮初一与十五
+  $name:vi-VN: Tô màu ngày Mùng 1 và Rằm
+  $description: In Vietnamese mode, highlight the 1st and 15th of each lunar month.
+  $description:zh-CN: 在越南农历模式下高亮农历初一与十五。
+  $description:vi-VN: Ở chế độ lịch âm Việt Nam, tô màu làm nổi bật ngày Mùng 1 và Rằm hàng tháng.
 - vietnameseSpecialColor: "FF5A5A"
-  $name: Vietnamese special day colour (Mùng 1, Rằm, Holidays)
-  $name:zh-CN: 越南农历特殊日期颜色（初一、十五、传统节日）
-  $name:vi-VN: Màu ngày đặc biệt (Mùng 1, Rằm, Lễ Tết)
-  $description: Hex color code (RRGGBB) for special lunar days in Vietnamese mode (default red FF5A5A).
-  $description:zh-CN: 越南农历模式下特殊日期的颜色（默认红色 FF5A5A）。
-  $description:vi-VN: Mã màu Hex (RRGGBB) cho ngày Mùng 1, Rằm và Lễ Tết (mặc định đỏ FF5A5A).
+  $name: Vietnamese special day colour (Mùng 1, Rằm)
+  $name:zh-CN: 越南农历特殊日期颜色（初一、十五）
+  $name:vi-VN: Màu ngày Mùng 1 và Rằm
+  $description: Hex color code (RRGGBB) for Mùng 1 and Rằm in Vietnamese mode (default red FF5A5A).
+  $description:zh-CN: 越南农历模式下初一、十五的颜色（默认红色 FF5A5A）。
+  $description:vi-VN: Mã màu Hex (RRGGBB) cho ngày Mùng 1 và Rằm (mặc định đỏ FF5A5A).
   #! $format: colorRgb
 - dataSourceUrl: ""
   $name: Data source (ICS, empty = no data)
@@ -477,6 +485,7 @@ struct Settings {
     winrt::Windows::UI::Color offDayColor{255, 78, 161, 255};
     winrt::Windows::UI::Color workdayColor{255, 255, 90, 90};
     std::wstring calendarMode = L"chinese";
+    bool highlightSpecialLunarDays = true;
     winrt::Windows::UI::Color vietnameseSpecialColor{255, 255, 90, 90};
 };
 
@@ -561,6 +570,8 @@ void LoadSettings() {
     if (settings->calendarMode.empty()) {
         settings->calendarMode = L"chinese";
     }
+    settings->highlightSpecialLunarDays =
+        Wh_GetIntSetting(L"highlightSpecialLunarDays") != 0;
     settings->vietnameseSpecialColor =
         ReadColorSetting(L"vietnameseSpecialColor", Settings{}.vietnameseSpecialColor);
     settings->dataSourceUrl = ReadStringSetting(L"dataSourceUrl");
@@ -1059,7 +1070,8 @@ std::wstring UnescapeIcsText(std::wstring const& text) {
 // only counts when it carries a （休）/（班） style marker.
 bool ClassifyIcsSummary(std::wstring const& summary,
                         std::wstring& name,
-                        bool& isOffDay) {
+                        bool& isOffDay,
+                        std::wstring const& calendarMode) {
     std::wstring text = UnescapeIcsText(summary);
     isOffDay = true;
 
@@ -1068,10 +1080,22 @@ bool ClassifyIcsSummary(std::wstring const& summary,
         bool isOffDay;
     };
     static const Marker kMarkers[] = {
+        // Chinese markers
         {L"（补班）", false}, {L"(补班)", false}, {L"【补班】", false}, {L"[补班]", false},
         {L"（班）", false},   {L"(班)", false},   {L"【班】", false},   {L"[班]", false},
         {L"（休）", true},    {L"(休)", true},    {L"【休】", true},    {L"[休]", true},
         {L"（放假）", true},  {L"(放假)", true},
+        // Vietnamese markers
+        {L"（Làm bù）", false}, {L"(Làm bù)", false}, {L"【Làm bù】", false}, {L"[Làm bù]", false},
+        {L"（làm bù）", false}, {L"(làm bù)", false}, {L"【làm bù】", false}, {L"[làm bù]", false},
+        {L"（Đi làm）", false},  {L"(Đi làm)", false},  {L"【Đi làm】", false},  {L"[Đi làm]", false},
+        {L"（đi làm）", false},  {L"(đi làm)", false},  {L"【đi làm】", false},  {L"[đi làm]", false},
+        {L"（Nghỉ bù）", true},  {L"(Nghỉ bù)", true},  {L"【Nghỉ bù】", true},  {L"[Nghỉ bù]", true},
+        {L"（nghỉ bù）", true},  {L"(nghỉ bù)", true},  {L"【nghỉ bù】", true},  {L"[nghỉ bù]", true},
+        {L"（Nghỉ lễ）", true},  {L"(Nghỉ lễ)", true},  {L"【Nghỉ lễ】", true},  {L"[Nghỉ lễ]", true},
+        {L"（nghỉ lễ）", true},  {L"(nghỉ lễ)", true},  {L"【nghỉ lễ】", true},  {L"[nghỉ lễ]", true},
+        {L"（Nghỉ）", true},     {L"(Nghỉ)", true},     {L"【Nghỉ】", true},     {L"[Nghỉ]", true},
+        {L"（nghỉ）", true},     {L"(nghỉ)", true},     {L"【nghỉ】", true},     {L"[nghỉ]", true},
     };
 
     bool marked = false;
@@ -1101,8 +1125,16 @@ bool ClassifyIcsSummary(std::wstring const& summary,
         }
     }
 
+    // In Vietnamese mode, general holiday feeds (such as Google Calendar or standard
+    // government holiday feeds) typically do not carry explicit marker tags.
+    // An event with a valid DTSTART in a holiday feed is treated as a day off by default.
     if (!marked) {
-        return false;
+        if (calendarMode == L"vietnamese") {
+            isOffDay = true;
+            marked = true;
+        } else {
+            return false;
+        }
     }
 
     name = TrimWhitespace(text);
@@ -1119,7 +1151,7 @@ std::atomic<bool> g_loggedRecurrence{false};
 // the next refresh and the shutdown.
 constexpr size_t kMaxHolidayDates = 20000;
 
-bool ParseIcs(std::wstring const& text, HolidayMap& out) {
+bool ParseIcs(std::wstring const& text, HolidayMap& out, std::wstring const& calendarMode) {
     auto lines = SplitIcsLines(text);
 
     bool inEvent = false;
@@ -1144,7 +1176,7 @@ bool ParseIcs(std::wstring const& text, HolidayMap& out) {
 
         std::wstring name;
         bool isOffDay = true;
-        if (!ClassifyIcsSummary(summary, name, isOffDay)) {
+        if (!ClassifyIcsSummary(summary, name, isOffDay, calendarMode)) {
             return;
         }
 
@@ -1257,7 +1289,8 @@ bool ParseHolidayData(std::wstring const& body, HolidayMap& out) {
         return false;
     }
 
-    return ParseIcs(body, out);
+    const std::shared_ptr<const Settings> settings = GetSettings();
+    return ParseIcs(body, out, settings->calendarMode);
 }
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -1469,12 +1502,6 @@ void StopWorkerThread() {
 void RequestHolidayData() {
     const std::shared_ptr<const Settings> settings = GetSettings();
     if (g_shuttingDown) {
-        return;
-    }
-
-    // In Vietnamese mode, lunar calendar is calculated strictly offline;
-    // no ICS feed is required or downloaded.
-    if (settings->calendarMode == L"vietnamese") {
         return;
     }
 
@@ -2293,36 +2320,30 @@ void ApplyToDayItem(wuxc::CalendarViewDayItem const& item) {
     }
 
     std::wstring desired;
-    // With "replace the lunar text" switched off, the cell keeps the text of the
-    // shell and only the colour is written.
-    if (settings->calendarMode == L"vietnamese") {
-        if (settings->replaceText) {
-            VietnameseHolidayInfo vinfo;
-            LookupVietnameseLunar(key, vinfo);
-            desired = vinfo.name;
+    VietnameseHolidayInfo vinfo;
+    bool hasVinfo = false;
 
-            // In Vietnamese mode, holiday coloring is tied to Vietnamese lunar dates
-            if (vinfo.isSpecial) {
-                SaveForeground(cell, label);
-                cell.ownBrush = SetForegroundIfDifferent(
-                    label, settings->vietnameseSpecialColor, cell.ownBrush);
-                cell.hadColor = true;
-            } else if (cell.hadColor) {
-                RestoreForeground(label, cell);
-                cell.hadColor = false;
+    // Determine the text to display:
+    // If the ICS feed specifies an event for this date, the holiday name takes precedence if replaceText is on.
+    // Otherwise, in Vietnamese mode, the lunar date (d/m) is displayed if replaceText is on.
+    if (hasInfo) {
+        if (settings->replaceText) {
+            if (info.isOffDay) {
+                desired = settings->offDayText.empty()
+                              ? info.name
+                              : ExpandName(settings->offDayText, info.name);
+            } else {
+                desired = ExpandName(settings->workdayText, info.name);
             }
-        } else if (cell.hadColor) {
-            RestoreForeground(label, cell);
-            cell.hadColor = false;
+        } else if (settings->calendarMode == L"vietnamese") {
+            LookupVietnameseLunar(key, vinfo);
+            hasVinfo = true;
+            desired = vinfo.name;
         }
-    } else if (hasInfo && settings->replaceText) {
-        if (info.isOffDay) {
-            desired = settings->offDayText.empty()
-                          ? info.name
-                          : ExpandName(settings->offDayText, info.name);
-        } else {
-            desired = ExpandName(settings->workdayText, info.name);
-        }
+    } else if (settings->calendarMode == L"vietnamese" && settings->replaceText) {
+        LookupVietnameseLunar(key, vinfo);
+        hasVinfo = true;
+        desired = vinfo.name;
     }
 
     std::wstring current = ElementText(label);
@@ -2355,24 +2376,34 @@ void ApplyToDayItem(wuxc::CalendarViewDayItem const& item) {
 
     cell.appliedText = desired;
 
-    // The colour is what marks the day, whichever text the cell ends up showing,
-    // so it does not depend on the text having been replaced. The shell's own
-    // colour is saved right before the first colour write: the colour is written
-    // with "replace the lunar text" switched off as well, and reading it back
-    // later would save the mod's own brush as the original one once the shell has
-    // rewritten the text of a cell the mod has already coloured.
-    if (settings->calendarMode != L"vietnamese") {
-        if (hasInfo) {
+    // The colour is what marks the day, whichever text the cell ends up showing.
+    // Holiday data from ICS takes precedence if present.
+    // In Vietnamese mode, special lunar days (Mùng 1 & Rằm) can be highlighted if enabled.
+    if (hasInfo) {
+        SaveForeground(cell, label);
+        cell.ownBrush = SetForegroundIfDifferent(
+            label,
+            info.isOffDay ? settings->offDayColor : settings->workdayColor,
+            cell.ownBrush);
+        cell.hadColor = true;
+    } else if (settings->calendarMode == L"vietnamese" && settings->replaceText &&
+               settings->highlightSpecialLunarDays) {
+        if (!hasVinfo) {
+            LookupVietnameseLunar(key, vinfo);
+            hasVinfo = true;
+        }
+        if (vinfo.isSpecial) {
             SaveForeground(cell, label);
             cell.ownBrush = SetForegroundIfDifferent(
-                label,
-                info.isOffDay ? settings->offDayColor : settings->workdayColor,
-                cell.ownBrush);
+                label, settings->vietnameseSpecialColor, cell.ownBrush);
             cell.hadColor = true;
         } else if (cell.hadColor) {
             RestoreForeground(label, cell);
             cell.hadColor = false;
         }
+    } else if (cell.hadColor) {
+        RestoreForeground(label, cell);
+        cell.hadColor = false;
     }
 
 }
