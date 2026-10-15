@@ -242,9 +242,9 @@ already replaced is not written to any more.
 This mod includes an optional offline Vietnamese lunar calendar calculation (Hồ Ngọc Đức astronomical algorithm) contributed by @phatMT97 and @vantruong-dev.
 
 - **Offline calculation**: Calculates Vietnamese lunar dates (`d/m`, `d/mN` for leap months) completely offline without requiring any network requests.
-- **Special day highlighting**: Highlights Full Moon (*Rằm* - day 15) and New Moon (*Mùng 1* - day 1) in red (`#FF5A5A` by default, configurable).
+- **Special day highlighting**: Optionally highlights Full Moon (*Rằm* - day 15) and New Moon (*Mùng 1* - day 1) in red (`#FF5A5A` by default, disabled by default, configurable).
 - **Sexagenary Cycle Header**: Displays the full Vietnamese lunar date and year name (*Năm Can Chi*, e.g. `14 Tháng 9 Năm Bính Ngọ`) in the calendar header.
-- **Independent ICS Holiday Subscriptions**: You can independently subscribe to an iCalendar (.ics) feed to overlay statutory holidays and adjusted workdays onto either the Chinese or Vietnamese calendar. Events should carry a day-off marker (such as `(休)`, `(Nghỉ)`, `(nghỉ)`, `(Nghỉ lễ)`, `(Nghỉ bù)`) or a workday marker (such as `(班)`, `(Làm bù)`, `(làm bù)`). If your feed uses adjusted workdays in Vietnamese mode, you can customize the **Text of an adjusted workday** setting (`workdayText`, default `补班`) to e.g. `Làm bù` or `{name}`.
+- **Independent ICS Holiday Subscriptions**: You can independently subscribe to an iCalendar (.ics) feed to overlay statutory holidays and adjusted workdays onto either the Chinese or Vietnamese calendar. Events should carry a day-off marker (such as `(休)`, `(Nghỉ)`, `(nghỉ)`, `(Nghỉ lễ)`, `(Nghỉ bù)`) or a workday marker (such as `(班)`, `(Làm bù)`, `(làm bù)`). Both NFC (precomposed) and NFD (decomposed) Unicode formats are supported. If your feed uses adjusted workdays in Vietnamese mode, you can customize the **Text of an adjusted workday** setting (`workdayText`, default `补班`) to e.g. `Làm bù` or `{name}`.
 
 > **Disclaimer:** The mod author (@dcsmf) does not use or validate the Vietnamese lunar calendar. All Vietnamese lunar date calculations, leap-month handling, and maintenance are handled by @phatMT97 and @vantruong-dev. Please report any Vietnamese lunar date issues directly to their repositories.
 
@@ -282,7 +282,7 @@ use it themselves.
   $options:
     - chinese: Chinese calendar
     - vietnamese: Vietnamese lunar calendar
-- highlightSpecialLunarDays: true
+- highlightSpecialLunarDays: false
   $name: Highlight Mùng 1 and Rằm
   $name:zh-CN: 高亮初一与十五
   $name:vi-VN: Tô màu ngày Mùng 1 và Rằm
@@ -485,7 +485,7 @@ struct Settings {
     winrt::Windows::UI::Color offDayColor{255, 78, 161, 255};
     winrt::Windows::UI::Color workdayColor{255, 255, 90, 90};
     std::wstring calendarMode = L"chinese";
-    bool highlightSpecialLunarDays = true;
+    bool highlightSpecialLunarDays = false;
     winrt::Windows::UI::Color vietnameseSpecialColor{255, 255, 90, 90};
 };
 
@@ -1062,6 +1062,27 @@ std::wstring UnescapeIcsText(std::wstring const& text) {
     return result;
 }
 
+// Normalizes a string to Unicode Normalization Form C (precomposed characters).
+// This ensures ICS event summaries created in NFD (e.g. on macOS) match precomposed markers properly.
+std::wstring NormalizeNfc(std::wstring const& src) {
+    if (src.empty()) {
+        return {};
+    }
+    int len = NormalizeString(NormalizationC, src.c_str(),
+                              static_cast<int>(src.size()), nullptr, 0);
+    if (len <= 0) {
+        return src;
+    }
+    std::wstring dst(len, L'\0');
+    len = NormalizeString(NormalizationC, src.c_str(),
+                          static_cast<int>(src.size()), dst.data(), len);
+    if (len <= 0) {
+        return src;
+    }
+    dst.resize(len);
+    return dst;
+}
+
 // "元旦节（休）" -> name "元旦节", day off. "春节（班）" -> name "春节",
 // adjusted workday.
 //
@@ -1071,7 +1092,7 @@ std::wstring UnescapeIcsText(std::wstring const& text) {
 bool ClassifyIcsSummary(std::wstring const& summary,
                         std::wstring& name,
                         bool& isOffDay) {
-    std::wstring text = UnescapeIcsText(summary);
+    std::wstring text = NormalizeNfc(UnescapeIcsText(summary));
     isOffDay = true;
 
     struct Marker {
